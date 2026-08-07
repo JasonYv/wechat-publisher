@@ -17,6 +17,7 @@ Wechat Publisher 是一套可自托管的单公众号内容发布系统。它把
 - 发表请求原子抢占与结果不确定锁定，降低重复发表风险。
 - 自定义菜单 JSON 校验、手机预览、本地保存，覆盖前自动备份微信现有菜单。
 - SQLite 保存文章、素材、发布任务与操作日志。
+- 独立 Bearer Key 保护的外部发布 API，可把部署服务器作为微信 IP 白名单中转。
 - Docker 单机部署与健康检查。
 
 ## 运行要求
@@ -44,12 +45,43 @@ pnpm dev
 - `SESSION_SECRET`：不少于 32 个字符的随机会话密钥。
 - `WECHAT_APP_ID` / `WECHAT_APP_SECRET`：微信公众号服务器端凭据。
 - `WECHAT_ACCOUNT_NAME`：管理界面中显示的公众号名称。
+- `PUBLISH_API_KEY`：外部发布 API 的独立密钥，不少于 32 个随机字符；不要复用管理员密码、会话密钥或微信 AppSecret。
 
 生成会话密钥：
 
 ```bash
 openssl rand -base64 48
 ```
+
+## 通过服务器中转发布
+
+服务器配置 `PUBLISH_API_KEY` 后，可以从任意受信任的自动化脚本调用：
+
+```text
+本地脚本 → wchat.example.com → 微信公众号 API
+```
+
+微信看到的是部署服务器的固定出口 IP，因此微信白名单只需加入服务器 IP。外部调用方不需要持有微信 AppSecret。
+
+一键上传封面、正文图片、创建草稿并提交发表：
+
+```http
+POST /api/external/v1/publish?t=当前毫秒时间戳
+Authorization: Bearer <PUBLISH_API_KEY>
+X-Request-Timestamp: <当前毫秒时间戳>
+X-Idempotency-Key: <稳定 UUID>
+Content-Type: multipart/form-data
+```
+
+表单字段为 `title`、`digest`、`content`、`contentFormat=markdown|html`、`cover`、`imagesManifest` 及清单中对应的正文图片。接口返回 `202` 表示微信仍在处理，并不代表已经发表成功。
+
+使用相同鉴权头查询最终回执：
+
+```http
+GET /api/external/v1/articles/<X-Idempotency-Key>?t=当前毫秒时间戳
+```
+
+请求时间戳仅允许与服务器相差 5 分钟。每篇文章固定使用一个 UUID 幂等键，网络重试时必须复用该 UUID，以避免重复发表。
 
 默认菜单使用 `example.com` 作为占位地址。在点击“同步到微信”之前，务必改成你自己的链接并检查手机预览。
 

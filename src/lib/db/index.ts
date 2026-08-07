@@ -90,6 +90,16 @@ function initializeDatabase() {
       result_summary TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS external_publish_requests (
+      request_id TEXT PRIMARY KEY,
+      request_hash TEXT NOT NULL,
+      article_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
   `);
 
   const articleColumns = database.prepare("PRAGMA table_info(articles)").all() as {
@@ -196,6 +206,90 @@ export function getArticle(id: string): Article | null {
     | Record<string, unknown>
     | undefined;
   return row ? mapArticle(row) : null;
+}
+
+export type ExternalPublishRequestStatus =
+  | "processing"
+  | "submitted"
+  | "published"
+  | "failed"
+  | "unknown";
+
+export type ExternalPublishRequest = {
+  requestId: string;
+  requestHash: string;
+  articleId: string;
+  status: ExternalPublishRequestStatus;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+function mapExternalPublishRequest(row: Record<string, unknown>): ExternalPublishRequest {
+  return {
+    requestId: String(row.request_id),
+    requestHash: String(row.request_hash),
+    articleId: String(row.article_id),
+    status: String(row.status) as ExternalPublishRequestStatus,
+    error: row.error ? String(row.error) : null,
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+export function getExternalPublishRequest(requestId: string) {
+  const row = getDatabase()
+    .prepare("SELECT * FROM external_publish_requests WHERE request_id = ?")
+    .get(requestId) as Record<string, unknown> | undefined;
+  return row ? mapExternalPublishRequest(row) : null;
+}
+
+export function claimExternalPublishRequest(input: {
+  requestId: string;
+  requestHash: string;
+}) {
+  const database = getDatabase();
+  return database.transaction(() => {
+    const existing = getExternalPublishRequest(input.requestId);
+    if (existing) {
+      if (existing.requestHash !== input.requestHash) return "conflict" as const;
+      if (existing.status !== "failed") {
+        return "existing" as const;
+      }
+      database
+        .prepare(`
+          UPDATE external_publish_requests
+          SET status = 'processing', error = NULL, updated_at = ?
+          WHERE request_id = ?
+        `)
+        .run(new Date().toISOString(), input.requestId);
+      return "claimed" as const;
+    }
+
+    const now = new Date().toISOString();
+    database
+      .prepare(`
+        INSERT INTO external_publish_requests (
+          request_id, request_hash, article_id, status, error, created_at, updated_at
+        ) VALUES (?, ?, ?, 'processing', NULL, ?, ?)
+      `)
+      .run(input.requestId, input.requestHash, input.requestId, now, now);
+    return "claimed" as const;
+  })();
+}
+
+export function updateExternalPublishRequest(
+  requestId: string,
+  status: ExternalPublishRequestStatus,
+  error?: string | null,
+) {
+  getDatabase()
+    .prepare(`
+      UPDATE external_publish_requests
+      SET status = ?, error = ?, updated_at = ?
+      WHERE request_id = ?
+    `)
+    .run(status, error || null, new Date().toISOString(), requestId);
 }
 
 export function saveArticle(input: {
@@ -352,11 +446,11 @@ export function updateAssetWechatUrl(assetId: string, wechatUrl: string) {
 
 export function markArticleAsDraft(articleId: string, mediaId: string) {
   const now = new Date().toISOString();
-  getDatabase()
+  return getDatabase()
     .prepare(`
       UPDATE articles
       SET status = 'draft', wechat_draft_media_id = ?, last_synced_at = ?, updated_at = ?
-      WHERE id = ?
+      WHERE id = ? AND status IN ('local', 'modified', 'draft')
     `)
     .run(mediaId, now, now, articleId);
 }

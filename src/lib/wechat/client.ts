@@ -218,8 +218,17 @@ export async function uploadInlineImage(absolutePath: string) {
     absolutePath,
     action: "上传正文图片",
   });
-  const url = typeof result.url === "string" ? result.url : "";
+  let url = typeof result.url === "string" ? result.url : "";
   if (!url) throw new WechatApiError("微信未返回正文图片 URL");
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === "http:" && parsed.hostname.endsWith("qpic.cn")) {
+      parsed.protocol = "https:";
+      url = parsed.toString();
+    }
+  } catch {
+    throw new WechatApiError("微信返回了不合法的正文图片 URL");
+  }
   return url;
 }
 
@@ -275,6 +284,39 @@ export function markdownToWechatHtml(markdown: string, title: string) {
   return `<section style="max-width:100%;font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif;">${addInlineWechatStyles(clean)}</section>`;
 }
 
+export function sanitizeWechatHtmlContent(html: string) {
+  const clean = sanitizeHtml(html, {
+    allowedTags: [
+      "section",
+      "h1",
+      "h2",
+      "h3",
+      "p",
+      "span",
+      "strong",
+      "em",
+      "blockquote",
+      "ul",
+      "ol",
+      "li",
+      "a",
+      "code",
+      "pre",
+      "hr",
+      "img",
+      "br",
+    ],
+    allowedAttributes: {
+      "*": ["style"],
+      a: ["href", "title", "target", "style"],
+      img: ["src", "alt", "title", "style"],
+    },
+    allowedSchemes: ["https"],
+  });
+  if (!clean.trim()) throw new WechatApiError("文章正文为空");
+  return clean;
+}
+
 function buildDraftArticle(article: Article, content: string, thumbMediaId: string) {
   return {
     title: article.title,
@@ -307,8 +349,12 @@ async function verifyWechatDraft(mediaId: string, article: Article) {
   }
 }
 
-export async function upsertWechatDraft(article: Article, thumbMediaId: string) {
-  const content = markdownToWechatHtml(article.content, article.title);
+export async function upsertWechatDraftHtml(
+  article: Article,
+  html: string,
+  thumbMediaId: string,
+) {
+  const content = sanitizeWechatHtmlContent(html);
   const draftArticle = buildDraftArticle(article, content, thumbMediaId);
 
   if (article.wechatDraftMediaId) {
@@ -340,6 +386,14 @@ export async function upsertWechatDraft(article: Article, thumbMediaId: string) 
   return { mediaId, action: "created" as const };
 }
 
+export async function upsertWechatDraft(article: Article, thumbMediaId: string) {
+  return upsertWechatDraftHtml(
+    article,
+    markdownToWechatHtml(article.content, article.title),
+    thumbMediaId,
+  );
+}
+
 export async function listWechatDrafts(count = 20) {
   return postWechat(
     "/cgi-bin/draft/batchget",
@@ -355,7 +409,7 @@ export async function submitWechatPublish(mediaId: string) {
     "提交文章发表",
   );
   const publishId = typeof result.publish_id === "string" ? result.publish_id : "";
-  if (!publishId) throw new WechatApiError("微信未返回 publish_id");
+  if (!publishId) throw new WechatApiError("微信未返回 publish_id", undefined, true);
   return publishId;
 }
 

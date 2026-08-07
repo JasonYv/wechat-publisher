@@ -14,6 +14,7 @@ import {
   markArticleAsDraft,
   recordOperation,
   resolveUnknownPublishSubmission,
+  updateExternalPublishRequest,
   updateArticleCover,
   updateAssetWechatMedia,
 } from "@/lib/db";
@@ -104,7 +105,10 @@ export async function syncWechatDraftAction(
     }
 
     const result = await upsertWechatDraft(article, thumbMediaId);
-    markArticleAsDraft(articleId, result.mediaId);
+    const draftUpdate = markArticleAsDraft(articleId, result.mediaId);
+    if (draftUpdate.changes !== 1) {
+      throw new Error("文章状态已变化，系统已阻止覆盖当前发表任务");
+    }
     recordOperation({
       action: result.action === "created" ? "wechat.draft.create" : "wechat.draft.update",
       targetType: "article",
@@ -258,6 +262,7 @@ export async function resolveUnknownPublishAction(
   try {
     const articleId = readArticleId(formData);
     resolveUnknownPublishSubmission(articleId);
+    updateExternalPublishRequest(articleId, "failed", "管理员确认微信后台不存在发表任务");
     recordOperation({
       action: "wechat.publish.unknown.resolve",
       targetType: "article",
